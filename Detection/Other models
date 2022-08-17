@@ -1,4 +1,4 @@
-# MLP
+# Multi-Layer Peceptron
 ## Training
 model_mlp = mlp(random_state=0)
 parameter_grid = {'hidden_layer_sizes': [(50,50,50), (50,100,50), (100,)],
@@ -28,7 +28,8 @@ MLP.best_estimator_.fit(X.iloc[:,5:], y)
 AUC = auc(y, MLP.best_estimator_.predict_proba(X.iloc[:,5:].values)[:,1])
 print("MLP training set AUC", AUC)
 
-# GBM
+##############################################################################################################################
+# Gradient Boosting Machine
 ## Training
 model_gbm = gbm(random_state=0)
 parameter_grid = {"n_estimators" : [30], "max_depth" : [4]}
