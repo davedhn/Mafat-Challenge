@@ -33,10 +33,6 @@ import seaborn as sns
 sns.set_theme(style="ticks", color_codes=True)
 from sklearn.svm import SVC
 
-
-warnings.filterwarnings("ignore")
-os.chdir("/Users/davedahan/Desktop/2A ENSTA/Stage/Challenge1")
-
 ##############################################################################################################################
 # Get Data
 df = pd.read_csv("mafat_wifi_challenge_training_set_v1.csv")
