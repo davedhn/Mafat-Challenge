@@ -1,0 +1,392 @@
+import pandas as pd
+import os
+import numpy as np
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as lda
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis as qda
+from sklearn.metrics import log_loss
+from sklearn.metrics import roc_auc_score as auc
+from sklearn.metrics import roc_curve as roc
+from sklearn import svm
+from sklearn.linear_model import LogisticRegressionCV as logregcv
+from sklearn import linear_model as lm
+from sklearn.linear_model import ElasticNetCV as elnet
+from sklearn.model_selection import GridSearchCV,train_test_split,StratifiedKFold,cross_val_score
+from sklearn.ensemble import GradientBoostingClassifier as gbm
+from lightgbm import LGBMClassifier as lgb
+from make_data_windows import make_data
+from sklearn.tree import DecisionTreeClassifier
+import pickle
+import joblib
+import matplotlib.pyplot as plt
+from sklearn.neural_network import MLPClassifier as mlp
+from sklearn.model_selection import cross_validate
+import warnings
+import random
+from sklearn.neighbors import KNeighborsClassifier as knc
+from tslearn.metrics import dtw_path
+from scipy.stats import kurtosis, moment
+from sklearn.ensemble import AdaBoostClassifier as abc
+from sklearn.tree import DecisionTreeClassifier as dtc
+from sklearn.ensemble import RandomForestClassifier as rfc
+import math
+import seaborn as sns
+sns.set_theme(style="ticks", color_codes=True)
+from sklearn.svm import SVC
+
+
+warnings.filterwarnings("ignore")
+os.chdir("/Users/davedahan/Desktop/2A ENSTA/Stage/Challenge1")
+
+##############################################################################################################################
+# Get Data
+df = pd.read_csv("mafat_wifi_challenge_training_set_v1.csv")
+X,y = make_data(df)
+y = np.where(y>1,1,y)
+
+##############################################################################################################################
+def split_by_room(x,y):
+    room1 = random.randint(1,6)
+    room2 = random.randint(1,6)
+    test = []
+    train = []
+    for i in range(len(y)):
+        if X["Room_Num"].iloc[i] == room1 or X["Room_Num"].iloc[i] == room2:
+            test.append(i)
+        else:
+            train.append(i)
+    return X.iloc[train,:], X.iloc[test,:], y[train], y[test]
+    
+##############################################################################################################################
+# Feature crafting
+p = 0.5
+log_power_r =  np.array(list(map(lambda x: np.log(np.mean(x**2)) ,X["RSSI_Right"])))
+log_power_l =  np.array(list(map(lambda x: np.log(np.mean(x**2)) ,X["RSSI_Left"])))
+X["log_power"] = np.exp(-(log_power_r/log_power_l))
+
+FFTr = np.array(list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Right"])))
+FFTl = np.array(list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Left"])))
+indr = np.array(list(map(lambda x: np.argmin(x), FFTr)))
+indl = np.array(list(map(lambda x: np.argmin(x), FFTl)))
+ind2r = np.array(list(map(lambda x: np.argmax(x), FFTr)))
+ind2l = np.array(list(map(lambda x: np.argmax(x), FFTl)))
+
+conv = [np.mean(np.diff(np.log(np.abs(np.convolve(r,l))))) for r,l in zip(FFTr,FFTl)]
+X["conv"] = conv
+
+X["below_one_l"] = np.array(list(map(lambda x: len(np.where(x <= -1)[0]), FFTl)))
+X["below_one_r"] = np.array(list(map(lambda x: len(np.where(x <= -1)[0]), FFTr)))
+
+def freq_zero_crossing(sig, fs):
+    """
+    Frequency estimation from zero crossing method
+    sig - input signal
+    fs - sampling rate
+
+    return: 
+    dominant period
+    """
+    # Find the indices where there's a crossing
+    indices = np.where((sig[1:] >= 0) & (sig[:-1] < 0))[0]
+
+    # Let's calculate the real crossings by interpolate
+    crossings = [i - sig[i] / (sig[i+1] - sig[i]) for i in indices]
+
+    # Let's get the time between each crossing
+    # the diff function will get how many samples between each crossing
+    # we divide the sampling rate to get the time between them
+    delta_t = np.diff(crossings) / fs
+
+    # Get the mean value for the period
+    period = np.mean(delta_t)
+
+    if np.isnan(period) :
+        return 0
+
+    return period
+
+X["period_r"] = [freq_zero_crossing(x - np.mean(x) ,0.5) for x in X["RSSI_Right"]]
+X["period_l"] = [freq_zero_crossing(x - np.mean(x) ,0.5) for x in X["RSSI_Left"]]
+
+
+probmeanr = np.array(list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Right"])))
+probmeanl = np.array(list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Left"])))
+X["probmean"] = (probmeanr + probmeanl) * 10**(-7)
+
+X["corr"] = np.array([np.correlate(r,l)[0] for r,l in zip(FFTr,FFTl)]) * 10**(-4)
+
+maxmin = np.array([max(fr[r],fl[l]) for r,l,fr,fl in zip(indr,indl,FFTr,FFTl)])
+minmax = np.array([min(fr[r],fl[l]) for r,l,fr,fl in zip(ind2r,ind2l,FFTr,FFTl)])
+X["max_min"] = minmax - maxmin 
+
+varr = np.array([np.var(e) for e in zip(X["RSSI_Right"])])
+varl = np.array([np.var(e) for e in zip(X["RSSI_Left"])])
+X["var"] = varr - varl 
+
+spike_neg_r = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTr)))
+spike_neg_l = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTl)))
+X["spike_neg"] = spike_neg_r * spike_neg_l * 10**(-3)
+
+spike_pos_r = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTr)))
+spike_pos_l = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTl)))
+X["spike_pos"] = spike_pos_r * spike_pos_l * 10**(-3)
+
+cos_r = np.array(list(map(lambda x: np.mean(np.cos(x)) ,X["RSSI_Right"])))
+cos_l = np.array(list(map(lambda x: np.mean(np.cos(x)) ,X["RSSI_Left"])))
+X["cos"] = cos_r*cos_l 
+
+sin_r = np.array(list(map(lambda x: np.mean(np.sin(x)) ,X["RSSI_Right"])))
+sin_l = np.array(list(map(lambda x: np.mean(np.sin(x)) ,X["RSSI_Left"])))
+X["sin"] = sin_r*sin_l 
+
+max_r = np.array(list(map(lambda x: max(x) ,X["RSSI_Right"])))
+max_l = np.array(list(map(lambda x: max(x) ,X["RSSI_Left"])))
+X["max"] = max_r * max_l * 10**(-3)
+
+min_r = np.array(list(map(lambda x: min(x) ,X["RSSI_Right"])))
+min_l = np.array(list(map(lambda x: min(x) ,X["RSSI_Left"])))
+X["min"] = min_r - min_l 
+
+pstd_r = np.array([p**(mar-mir) for mar,mir in zip(max_r,min_r)])
+pstd_l = np.array([p**(mal-mil) for mal,mil in zip(max_l,min_l)])
+X["diffp"] = pstd_l - pstd_r 
+
+X["diff_mean"] = [abs(np.mean(x) - np.mean(y)) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+X["high_signal"] = [( len(np.where(x <= -50)[0]) + len(np.where(y <= -50)[0]) )/360
+                   for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+X["low_signal"] = [( len(np.where(x <= -70)[0]) + len(np.where(y <= -70)[0]) )/360
+                  for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+
+def calc_euclidean(actual, predic):
+    return np.sqrt(np.sum((actual - predic) ** 2))
+
+def calc_mape(actual, predic):
+    return np.mean(np.abs((actual - predic) / actual))
+
+X["euclidian"] = [calc_euclidean(x,y) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])] 
+X["mape"] = [calc_mape(x,y) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])] 
+
+def spectral_centroid(x, samplerate=44100):
+    magnitudes = np.abs(np.fft.rfft(x)) # magnitudes of positive frequencies
+    length = len(x)
+    freqs = np.abs(np.fft.fftfreq(length, 1.0/samplerate)[:length//2+1]) # positive frequencies
+    return np.sum(magnitudes*freqs) / np.sum(magnitudes) # return weighted mean
+
+spectroid_r = np.array([spectral_centroid(y) for y in X["RSSI_Right"]])
+spectroid_l = np.array([spectral_centroid(y) for y in X["RSSI_Left"]])
+X["spectroid"] = np.log(spectroid_l/spectroid_r)
+pos_spectroid = list(np.where( np.array([math.isnan(x) for x in X["spectroid"]]) )[0])
+pos2_spectroid = list(np.where( np.array([math.isinf(x) for x in X["spectroid"]]) )[0])
+X["spectroid"].values[pos_spectroid] = 0
+X["spectroid"].values[pos2_spectroid] = np.finfo(np.float32).max
+
+
+dtw = [dtw_path(x,y)[1] for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+X["dtw"] = dtw
+
+kts_r = np.array([kurtosis(x) for x in X["RSSI_Right"]])
+kts_l = np.array([kurtosis(x) for x in X["RSSI_Left"]])
+X["kts"] = kts_r*kts_l*10**(-4)
+
+##############################################################################################################################
+Xtrain,Xtest,ytrain,ytest = split_by_room(X,y)
+
+##############################################################################################################################
+# Plot a particular variable
+def plot_var(var, y_):
+    var = np.array(var)
+    y0 = []
+    y1 = []
+    for i in range(len(y_)):
+        if y_[i] == 0:
+            y0.append(var[i])
+        else:
+            y1.append(var[i])
+            
+    plt.xlabel("")
+    plt.ylabel("")
+    plt.plot(np.where(y_ == 0)[0],y0, color = "r")
+    #plt.show() #If you want to print 0 and 1 together
+    plt.plot(np.where(y_ != 0)[0],y1, color = "b")
+    plt.legend(["0","1"])
+    plt.show()
+    
+##############################################################################################################################
+# Feature importance 
+rf = rfc(random_state=0)
+rf.fit(X.iloc[:,5:].values,y)
+feat = rf.feature_importances_
+ind = np.argsort(feat)[::-1]
+plt.plot(np.asarray(X.iloc[:,5:].columns[ind[0:7]]), feat[ind[0:7]]*100, marker = "o") 
+plt.title("Feature importance using Gini criterion")
+plt.ylabel("Feature importance in %")
+
+##############################################################################################################################
+# Print RSSI
+pos1 = np.where(df["Num_People"][0:30712] >= 1)[0]
+pos0 = np.where(df["Num_People"][0:30712] == 0)[0]
+plt.scatter(df["Time"][pos0], df["RSSI_Right"][pos0], marker = "o")
+plt.scatter(df["Time"][pos1], df["RSSI_Right"][pos1], marker = "o")
+plt.xlabel("Time (s)")
+plt.ylabel("RSSI")
+plt.title("RSSI Right")
+plt.legend(["0","1"], loc = "upper left" )
+plt.plot(df["Time"][0:30712], df["RSSI_Right"][0:30712], color = "black")
+
+pos1 = np.where(y >= 1)[0][0]
+pos0 = np.where(y == 0)[0][0]
+plt.scatter(range(0,180),FFTl[pos0], marker = "o")
+plt.scatter(range(0,180), FFTl[pos1], marker = "o")
+plt.xlabel("")
+plt.ylabel("Fourier Transform")
+plt.title("Left RSSI Discrete Fourier Transform")
+plt.legend(["0","1"], loc = "upper right" )
+plt.plot(range(0,180),FFTl[pos0], color = "blue")
+plt.plot(range(0,180),FFTl[pos1], color = "orange")
+X["Device_ID"][pos1]
+
+##############################################################################################################################
+# Plot ROC curve
+def plot_roc(model,X,y_) :
+    fpr,tpr,_ = roc(y_, model.predict_proba(X.iloc[:,5:])[:,1])
+    plt.plot(fpr,tpr)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC curve")
+    plt.plot([0,1],[0,1],linestyle = "-.")
+    plt.legend(["ROC curve", "Binary decision rule"])
+    plt.show()
+
+# Plot loss function
+def plot_loss(model):
+    results = model.evals_result_
+    epochs = len(results['valid_0']['binary_logloss'])
+    x_axis = range(0, epochs)
+    plt.plot(x_axis, results['valid_0']['binary_logloss'], label='Train')
+    plt.plot(x_axis, results['valid_1']['binary_logloss'], label='Test')
+    plt.legend()
+    plt.ylabel('Log Loss')
+    plt.title('LGBM Log Loss')
+    plt.show()
+    
+# Plot error function
+def plot_error(model):
+    results = model.evals_result_
+    epochs = len(results['valid_0']['binary_error'])
+    x_axis = range(0, epochs)
+    plt.plot(x_axis, results['valid_0']['binary_error'], label='Train')
+    plt.plot(x_axis, results['valid_1']['binary_error'], label='Test')
+    plt.legend()
+    plt.ylabel('Classification error rate')
+    plt.title('LGBM Classification error')
+    plt.show()
+
+##############################################################################################################################
+# LGBM
+# Training 
+eval_set = [(Xtrain.iloc[:,5:].values, ytrain), (Xtest.iloc[:,5:].values, ytest)]
+LGBM = lgb(max_depth=2, metric='auc', n_estimators=150, objective='binary', random_state=0)
+LGBM.fit(Xtrain.iloc[:,5:].values, ytrain, eval_metric=["logloss", "error"], eval_set=eval_set, verbose=False)
+
+AUC = auc(ytrain, LGBM.predict_proba(Xtrain.iloc[:,5:].values)[:,1])
+print("LGBM training set AUC", AUC)
+plot_roc(LGBM,Xtrain,ytrain)
+
+# Test
+AUC = auc(ytest,LGBM.predict_proba(Xtest.iloc[:,5:].values)[:,1])
+print("LGBM test set AUC", AUC)
+plot_roc(LGBM,Xtest,ytest)
+
+# Loss of LGBM
+plot_loss(LGBM)
+
+# Error of LGBM
+plot_error(LGBM)
+
+# LGBM all data
+LGBM.fit(X.iloc[:,5:].values, y, eval_metric=["logloss"], eval_set=eval_set, verbose=False)
+AUC = auc(y, LGBM.predict_proba(X.iloc[:,5:].values)[:,1])
+print("LGBM training set AUC", AUC)
+
+##############################################################################################################################
+# KNC
+## Training
+KNC = knc(n_neighbors=10,leaf_size=10, p=5,metric='nan_euclidean')
+KNC.fit(Xtrain.iloc[:,5:].values, ytrain)
+
+## AUC
+AUC = auc(ytrain, KNC.predict_proba(Xtrain.iloc[:,5:].values)[:,1])
+print("KNC training set AUC", AUC)
+plot_roc(KNC,Xtrain,ytrain)
+
+## Test
+AUC = auc(ytest,KNC.predict_proba(Xtest.iloc[:,5:].values)[:,1])
+print("KNC test set AUC", AUC)
+plot_roc(KNC,Xtest,ytest)
+
+##############################################################################################################################
+# AdaBoostClassifier
+## Training
+ABC = abc(n_estimators=250, learning_rate=0.3)
+ABC.fit(Xtrain.iloc[:,5:].values, ytrain)
+
+## AUC
+AUC = auc(ytrain, ABC.predict_proba(Xtrain.iloc[:,5:].values)[:,1])
+print("ABC training set AUC", AUC)
+plot_roc(ABC,Xtrain,ytrain)
+
+# Plot errors
+plt.plot(ABC.estimator_errors_)
+plt.ylabel("Classification error rate")
+plt.title("Training Classification error")
+
+# Test
+AUC = auc(ytest,ABC.predict_proba(Xtest.iloc[:,5:].values)[:,1])
+print("ABC test set AUC", AUC)
+plot_roc(ABC,Xtest,ytest)
+
+# All data
+ABC.fit(X.iloc[:,5:].values, y)
+AUC = auc(y, ABC.predict_proba(X.iloc[:,5:].values)[:,1])
+print("ABC training set AUC", AUC)
+
+##############################################################################################################################
+# Decision Tree Classifier
+## Training
+DTC = dtc(criterion='gini',min_samples_leaf = 50, ccp_alpha = 0.00007, max_features = "log2", 
+          min_impurity_decrease = 0.00001)
+DTC.fit(Xtrain.iloc[:,5:].values, ytrain)
+
+## AUC
+AUC = auc(ytrain, DTC.predict_proba(Xtrain.iloc[:,5:].values)[:,1])
+print("DTC training set AUC", AUC)
+plot_roc(DTC,Xtrain,ytrain)
+
+## Test
+AUC = auc(ytest,DTC.predict_proba(Xtest.iloc[:,5:].values)[:,1])
+print("DTC test set AUC", AUC)
+plot_roc(DTC,Xtest,ytest)
+
+##############################################################################################################################
+# Support Vector Classifier
+## Training
+svc = SVC(C=1, probability=True, degree = 2, coef0 = 0.0001)
+svc.fit(Xtrain.iloc[:,5:].values, ytrain)
+
+## AUC
+AUC = auc(ytrain, svc.predict_proba(Xtrain.iloc[:,5:].values)[:,1])
+print("SVC training set AUC", AUC)
+plot_roc(svc,Xtrain,ytrain)
+
+## Test
+AUC = auc(ytest,svc.predict_proba(Xtest.iloc[:,5:].values)[:,1])
+print("SVC test set AUC", AUC)
+plot_roc(svc,Xtest,ytest)
+
+
+
+
+
+
+
+
+
