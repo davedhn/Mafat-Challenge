@@ -24,10 +24,307 @@ from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering as ac
 from sklearn.decomposition import PCA
 from sklearn.decomposition import KernelPCA as KPCA
+
 ##############################################################################################################################
+# Get Data
+df = pd.read_csv(r"mafat_wifi_challenge_training_set_v1.csv")
+X,y = make_data(df)
+
 ##############################################################################################################################
+def split_by_room(x,y):
+    room1 = random.randint(1,6)
+    room2 = random.randint(1,6)
+    test = []
+    train = []
+    for i in range(len(y)):
+        if X["Room_Num"].iloc[i] == room1 or X["Room_Num"].iloc[i] == room2:
+            test.append(i)
+        else:
+            train.append(i)
+    return X.iloc[train,:], X.iloc[test,:], y[train], y[test]
+
+# Plot loss function
+def plot_loss(model):
+    results = model.evals_result_
+    epochs = len(results['valid_0']['multi_logloss'])
+    x_axis = range(0, epochs)
+    plt.plot(x_axis, results['valid_0']['multi_logloss'], label='Train')
+    plt.plot(x_axis, results['valid_1']['multi_logloss'], label='Test')
+    plt.legend()
+    plt.ylabel('Log Loss')
+    plt.title('LGBM Log Loss')
+    plt.show()
+    
+# Plot error function
+def plot_error(model):
+    results = model.evals_result_
+    epochs = len(results['valid_0']['multi_error'])
+    x_axis = range(0, epochs)
+    plt.plot(x_axis, results['valid_0']['multi_error'], label='Train')
+    plt.plot(x_axis, results['valid_1']['multi_error'], label='Test')
+    plt.legend()
+    plt.ylabel('Classification error rate')
+    plt.title('LGBM Classification error')
+    plt.show()
+    
+# Plot corr
+def plot_corr(pred):
+    pred0 = np.where(pred == 0)[0]
+    pred1 = np.where(pred == 1)[0]
+    pred2 = np.where(pred == 2)[0]
+    pred3 = np.where(pred == 3)[0]
+    corr = X["corr"].values
+    plt.scatter(pred0, corr[pred0], marker = 'o', label = '0')
+    plt.scatter(pred1, corr[pred1], marker = 'o', label = '1')
+    
+    if len(pred2)!=0:
+        plt.scatter(pred2, corr[pred2], marker = 'o', label = '2')
+        
+    if len(pred3)!=0:
+        plt.scatter(pred3, corr[pred3], marker = 'o', label = '3')
+    
+    if y.equals(pred) :
+        plt.title("Variable corr depending on true number of people")
+    else:
+        plt.title("Variable corr depending on predicted number of people")
+        
+    plt.ylabel("corr")
+    plt.legend(loc = "best")
+    plt.show()
+   
 ##############################################################################################################################
+# Feature crafting
+p = 0.5
+log_power_r =  np.array(list(map(lambda x: np.log(np.mean(x**2)) ,X["RSSI_Right"])))
+log_power_l =  np.array(list(map(lambda x: np.log(np.mean(x**2)) ,X["RSSI_Left"])))
+X["log_power"] = np.exp(-(log_power_r/log_power_l))
+
+FFTr = np.array(list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Right"])))
+FFTl = np.array(list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Left"])))
+indr = np.array(list(map(lambda x: np.argmin(x), FFTr)))
+indl = np.array(list(map(lambda x: np.argmin(x), FFTl)))
+ind2r = np.array(list(map(lambda x: np.argmax(x), FFTr)))
+ind2l = np.array(list(map(lambda x: np.argmax(x), FFTl)))
+
+conv = [np.mean(np.diff(np.log(np.abs(np.convolve(r,l))))) for r,l in zip(FFTr,FFTl)]
+X["conv"] = conv
+
+X["below_one_l"] = np.array(list(map(lambda x: len(np.where(x <= -1)[0]), FFTl)))
+X["below_one_r"] = np.array(list(map(lambda x: len(np.where(x <= -1)[0]), FFTr)))
+
+def freq_zero_crossing(sig, fs):
+    """
+    Frequency estimation from zero crossing method
+    sig - input signal
+    fs - sampling rate
+
+    return: 
+    dominant period
+    """
+    # Find the indices where there's a crossing
+    indices = np.where((sig[1:] >= 0) & (sig[:-1] < 0))[0]
+
+    # Let's calculate the real crossings by interpolate
+    crossings = [i - sig[i] / (sig[i+1] - sig[i]) for i in indices]
+
+    # Let's get the time between each crossing
+    # the diff function will get how many samples between each crossing
+    # we divide the sampling rate to get the time between them
+    delta_t = np.diff(crossings) / fs
+
+    # Get the mean value for the period
+    period = np.mean(delta_t)
+
+    if np.isnan(period) :
+        return 0
+
+    return period
+
+X["period_r"] = [freq_zero_crossing(x - np.mean(x) ,0.5) for x in X["RSSI_Right"]]
+X["period_l"] = [freq_zero_crossing(x - np.mean(x) ,0.5) for x in X["RSSI_Left"]]
+
+
+probmeanr = np.array(list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Right"])))
+probmeanl = np.array(list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Left"])))
+X["probmean"] = (probmeanr + probmeanl) * 10**(-7)
+
+X["corr"] = np.array([np.correlate(r,l)[0] for r,l in zip(FFTr,FFTl)]) * 10**(-4)
+
+maxmin = np.array([max(fr[r],fl[l]) for r,l,fr,fl in zip(indr,indl,FFTr,FFTl)])
+minmax = np.array([min(fr[r],fl[l]) for r,l,fr,fl in zip(ind2r,ind2l,FFTr,FFTl)])
+X["max_min"] = minmax - maxmin 
+
+varr = np.array([np.var(e) for e in zip(X["RSSI_Right"])])
+varl = np.array([np.var(e) for e in zip(X["RSSI_Left"])])
+X["var"] = varr - varl 
+
+spike_neg_r = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTr)))
+spike_neg_l = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTl)))
+X["spike_neg"] = spike_neg_r * spike_neg_l * 10**(-3)
+
+spike_pos_r = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTr)))
+spike_pos_l = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTl)))
+X["spike_pos"] = spike_pos_r * spike_pos_l * 10**(-3)
+
+cos_r = np.array(list(map(lambda x: np.mean(np.cos(x)) ,X["RSSI_Right"])))
+cos_l = np.array(list(map(lambda x: np.mean(np.cos(x)) ,X["RSSI_Left"])))
+X["cos"] = cos_r*cos_l 
+
+sin_r = np.array(list(map(lambda x: np.mean(np.sin(x)) ,X["RSSI_Right"])))
+sin_l = np.array(list(map(lambda x: np.mean(np.sin(x)) ,X["RSSI_Left"])))
+X["sin"] = sin_r*sin_l 
+
+max_r = np.array(list(map(lambda x: max(x) ,X["RSSI_Right"])))
+max_l = np.array(list(map(lambda x: max(x) ,X["RSSI_Left"])))
+X["max"] = max_r * max_l * 10**(-3)
+
+min_r = np.array(list(map(lambda x: min(x) ,X["RSSI_Right"])))
+min_l = np.array(list(map(lambda x: min(x) ,X["RSSI_Left"])))
+X["min"] = min_r - min_l 
+
+pstd_r = np.array([p**(mar-mir) for mar,mir in zip(max_r,min_r)])
+pstd_l = np.array([p**(mal-mil) for mal,mil in zip(max_l,min_l)])
+X["diffp"] = pstd_l - pstd_r 
+
+X["diff_mean"] = [abs(np.mean(x) - np.mean(y)) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+X["high_signal"] = [( len(np.where(x <= -50)[0]) + len(np.where(y <= -50)[0]) )/360
+                   for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+X["low_signal"] = [( len(np.where(x <= -70)[0]) + len(np.where(y <= -70)[0]) )/360
+                  for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+
+def calc_euclidean(actual, predic):
+    return np.sqrt(np.sum((actual - predic) ** 2))
+
+def calc_mape(actual, predic):
+    return np.mean(np.abs((actual - predic) / actual))
+
+X["euclidian"] = [calc_euclidean(x,y) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])] 
+X["mape"] = [calc_mape(x,y) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])] 
+
+def spectral_centroid(x, samplerate=44100):
+    magnitudes = np.abs(np.fft.rfft(x)) # magnitudes of positive frequencies
+    length = len(x)
+    freqs = np.abs(np.fft.fftfreq(length, 1.0/samplerate)[:length//2+1]) # positive frequencies
+    return np.sum(magnitudes*freqs) / np.sum(magnitudes) # return weighted mean
+
+spectroid_r = np.array([spectral_centroid(y) for y in X["RSSI_Right"]])
+spectroid_l = np.array([spectral_centroid(y) for y in X["RSSI_Left"]])
+X["spectroid"] = np.log(spectroid_l/spectroid_r)
+pos_spectroid = list(np.where( np.array([math.isnan(x) for x in X["spectroid"]]) )[0])
+pos2_spectroid = list(np.where( np.array([math.isinf(x) for x in X["spectroid"]]) )[0])
+X["spectroid"].values[pos_spectroid] = 0
+X["spectroid"].values[pos2_spectroid] = np.finfo(np.float32).max
+
+
+dtw = [dtw_path(x,y)[1] for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+X["dtw"] = dtw
+
+kts_r = np.array([kurtosis(x) for x in X["RSSI_Right"]])
+kts_l = np.array([kurtosis(x) for x in X["RSSI_Left"]])
+X["kts"] = kts_r*kts_l*10**(-4)
+
+Xtrain,Xtest,ytrain,ytest = train_test_split(X,y,test_size=0.3,random_state=0)
+
 ##############################################################################################################################
+# LGBM
+## Training 
+eval_set = [(Xtrain.iloc[:,5:].values, ytrain), (Xtest.iloc[:,5:].values, ytest)]
+LGBM = lgb(max_depth=5, n_estimators=220, objective='multiclass', random_state=0)
+LGBM.fit(Xtrain.iloc[:,5:].values, ytrain, eval_metric=["logloss", "error"], eval_set=eval_set, verbose=False)
+
+## Train
+MAE = mae(ytrain, LGBM.predict(Xtrain.iloc[:,5:].values))
+print("MAE = ", MAE)
+
+## Test
+MAE = mae(ytest, LGBM.predict(Xtest.iloc[:,5:].values))
+print("MAE = ", MAE)
+
+## Loss of LGBM
+plot_loss(LGBM)
+
+## Error of LGBM
+plot_error(LGBM)
+
+## Plot correlation
+plot_corr(y)
+
 ##############################################################################################################################
+# K means
+kmeans = KMeans(n_clusters=4, random_state=0, max_iter = 100, n_init = 1000).fit_predict(X.iloc[:,5:].values)
+
+MAE = mae(y, kmeans)
+print("MAE = ", MAE)
+
+## Plot correlation
+plot_corr(kmeans)
+
 ##############################################################################################################################
+# Agglomerative Clustering
+AC = ac(n_clusters=4, linkage = 'average').fit_predict(X.iloc[:,5:].values)
+
+MAE = mae(y, AC)
+print("MAE = ", MAE)
+
+## Plot correlation
+plot_corr(AC)
+
 ##############################################################################################################################
+# PCA
+pca = PCA(n_components=3)
+pca_val = pca.fit_transform(X.iloc[:,5:].values)
+
+## Explained Variance Ratio
+plt.plot(["first component", "second component", "third component"],pca.explained_variance_ratio_*100 , marker = "o") 
+plt.title("Explained variance ratio")
+plt.ylabel("ratio in %")
+
+## PCA with 2 components
+pca = PCA(n_components=2)
+pca_val = pca.fit_transform(X.iloc[:,5:].values)
+
+############################################################
+## K means with PCA
+kmeans = KMeans(n_clusters=4, random_state=0, max_iter = 1000, n_init = 1000,  algorithm='lloyd').fit_predict(pca_val)
+
+MAE = mae(y, kmeans)
+print("MAE = ", MAE)
+
+### Plot correlation
+plot_corr(kmeans)
+
+############################################################
+# Agglomerative Clustering with PCA
+AC = ac(n_clusters=4, linkage = 'average').fit_predict(pca_val)
+
+MAE = mae(y, AC)
+print("MAE = ", MAE)
+
+### Plot correlation
+plot_corr(AC)
+
+##############################################################################################################################
+# Kernel PCA
+kpca = KPCA(n_components=2, kernel='rbf')
+kpca_val = kpca.fit_transform(X.iloc[:,5:].values)
+
+############################################################
+# K means with Kernel PCA
+kmeans = KMeans(n_clusters=4, random_state=0, max_iter = 100, n_init = 1000,  
+                algorithm='lloyd').fit_predict(kpca_val)
+
+MAE = mae(y, kmeans)
+print("MAE = ", MAE)
+
+### Plot correlation
+plot_corr(kmeans)
+
+############################################################
+# Agglomerative Clustering with Kernel PCA
+AC = ac(n_clusters=4, linkage = 'average').fit_predict(kpca_val)
+
+MAE = mae(y, AC)
+print("MAE = ", MAE)
+
+### Plot correlation
+plot_corr(AC)
