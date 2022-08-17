@@ -1,0 +1,196 @@
+import numpy as np   
+import pandas as pd
+from tslearn.metrics import dtw_path
+from scipy.stats import kurtosis, moment
+
+def extract_features(data):
+    X = pd.DataFrame(columns = data.columns)
+    for col in data.columns :
+        X.loc[0,col] = np.array(data[col])
+
+    # Feature crafting
+    p = 0.5
+    log_power_r =  np.array(list(map(lambda x: np.log(np.mean(x**2)) ,X["RSSI_Right"])))
+    log_power_l =  np.array(list(map(lambda x: np.log(np.mean(x**2)) ,X["RSSI_Left"])))
+    X["log_power"] = np.exp(-(log_power_r/log_power_l))
+
+    FFTr = np.array(list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Right"])))
+    FFTl = np.array(list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Left"])))
+    indr = np.array(list(map(lambda x: np.argmin(x), FFTr)))
+    indl = np.array(list(map(lambda x: np.argmin(x), FFTl)))
+    ind2r = np.array(list(map(lambda x: np.argmax(x), FFTr)))
+    ind2l = np.array(list(map(lambda x: np.argmax(x), FFTl)))
+
+    conv = [np.mean(np.diff(np.log(np.abs(np.convolve(r,l))))) for r,l in zip(FFTr,FFTl)]
+    X["conv"] = conv
+
+    def freq_zero_crossing(sig, fs):
+        """
+        Frequency estimation from zero crossing method
+        sig - input signal
+        fs - sampling rate
+
+        return: 
+        dominant period
+        """
+        # Find the indices where there's a crossing
+        indices = np.where((sig[1:] >= 0) & (sig[:-1] < 0))[0]
+
+        # Let's calculate the real crossings by interpolate
+        crossings = [i - sig[i] / (sig[i+1] - sig[i]) for i in indices]
+
+        # Let's get the time between each crossing
+        # the diff function will get how many samples between each crossing
+        # we divide the sampling rate to get the time between them
+        delta_t = np.diff(crossings) / fs
+
+        # Get the mean value for the period
+        period = np.mean(delta_t)
+
+        if np.isnan(period) :
+            return 0
+
+        return period
+
+    X["period_r"] = [freq_zero_crossing(x - np.mean(x) ,0.5) for x in X["RSSI_Right"]]
+    X["period_l"] = [freq_zero_crossing(x - np.mean(x) ,0.5) for x in X["RSSI_Left"]]
+
+
+    probmeanr = np.array(list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Right"])))
+    probmeanl = np.array(list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Left"])))
+    X["probmean"] = probmeanr + probmeanl
+
+    X["corr"] = [np.correlate(r,l)[0] for r,l in zip(FFTr,FFTl)]
+
+    maxmin = np.array([max(fr[r],fl[l]) for r,l,fr,fl in zip(indr,indl,FFTr,FFTl)])
+    minmax = np.array([min(fr[r],fl[l]) for r,l,fr,fl in zip(ind2r,ind2l,FFTr,FFTl)])
+    X["max_min"] = minmax - maxmin 
+
+    varr = np.array([np.var(e) for e in zip(X["RSSI_Right"])])
+    varl = np.array([np.var(e) for e in zip(X["RSSI_Left"])])
+    X["var"] = varr - varl 
+
+    spike_neg_r = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTr)))
+    spike_neg_l = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTl)))
+    X["spike_neg"] = spike_neg_r * spike_neg_l 
+
+    spike_pos_r = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTr)))
+    spike_pos_l = np.array(list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTl)))
+    X["spike_pos"] = spike_pos_r * spike_pos_l 
+
+    cos_r = np.array(list(map(lambda x: np.mean(np.cos(x)) ,X["RSSI_Right"])))
+    cos_l = np.array(list(map(lambda x: np.mean(np.cos(x)) ,X["RSSI_Left"])))
+    X["cos"] = cos_r*cos_l 
+
+    sin_r = np.array(list(map(lambda x: np.mean(np.sin(x)) ,X["RSSI_Right"])))
+    sin_l = np.array(list(map(lambda x: np.mean(np.sin(x)) ,X["RSSI_Left"])))
+    X["sin"] = sin_r*sin_l 
+
+    max_r = np.array(list(map(lambda x: max(x) ,X["RSSI_Right"])))
+    max_l = np.array(list(map(lambda x: max(x) ,X["RSSI_Left"])))
+    X["max"] = max_r * max_l 
+
+    min_r = np.array(list(map(lambda x: min(x) ,X["RSSI_Right"])))
+    min_l = np.array(list(map(lambda x: min(x) ,X["RSSI_Left"])))
+    X["min"] = min_r - min_l 
+
+    pstd_r = np.array([p**(mar-mir) for mar,mir in zip(max_r,min_r)])
+    pstd_l = np.array([p**(mal-mil) for mal,mil in zip(max_l,min_l)])
+    X["diffp"] = pstd_l - pstd_r 
+
+    X["diff_mean"] = [abs(np.mean(x) - np.mean(y)) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+    X["high_signal"] = [( len(np.where(x <= -50)[0]) + len(np.where(y <= -50)[0]) )/360
+                       for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+    X["low_signal"] = [( len(np.where(x <= -70)[0]) + len(np.where(y <= -70)[0]) )/360
+                      for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+
+    def calc_euclidean(actual, predic):
+        return np.sqrt(np.sum((actual - predic) ** 2))
+
+    def calc_mape(actual, predic):
+        return np.mean(np.abs((actual - predic) / actual))
+
+    X["euclidian"] = [calc_euclidean(x,y) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])] 
+    X["mape"] = [calc_mape(x,y) for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])] 
+
+    def spectral_centroid(x, samplerate=44100):
+        magnitudes = np.abs(np.fft.rfft(x)) # magnitudes of positive frequencies
+        length = len(x)
+        freqs = np.abs(np.fft.fftfreq(length, 1.0/samplerate)[:length//2+1]) # positive frequencies
+        return np.sum(magnitudes*freqs) / np.sum(magnitudes) # return weighted mean
+
+    spectroid_r = np.array([spectral_centroid(y) for y in X["RSSI_Right"]])
+    spectroid_l = np.array([spectral_centroid(y) for y in X["RSSI_Left"]])
+    X["spectroid"] = spectroid_l*spectroid_r*10**(-7)
+
+    dtw = [dtw_path(x,y)[1] for x,y in zip(X["RSSI_Right"], X["RSSI_Left"])]
+    X["dtw"] = dtw
+
+    kts_r = np.array([kurtosis(x) for x in X["RSSI_Right"]])
+    kts_l = np.array([kurtosis(x) for x in X["RSSI_Left"]])
+    X["kts"] = kts_r*kts_l
+
+    return pd.DataFrame(X)
+    
+def preprocess(X):
+    """
+    Calculate the features on the selected RSSI on the test set
+    :param X: Dataset to extract features from.
+    :param RSSI_value_selection: Which signal values to use- - in our case it is Average.
+    :return: Test x dataset with features
+    """
+    x = extract_features(X)
+    
+    return x.drop(columns=["Time","Device_ID","RSSI_Left","RSSI_Right"])
+
+##############################################################################################################################
+import pickle
+import numpy as np
+from os.path import isfile
+import joblib
+from lightgbm import LGBMClassifier as lgb
+from sklearn.ensemble import GradientBoostingClassifier as gbm
+from sklearn.neural_network import MLPClassifier as mlp
+from helper_func import preprocess
+import os
+from sklearn.neighbors import KNeighborsClassifier as knc
+from sklearn.ensemble import AdaBoostClassifier as abc
+
+class model:
+    def __init__(self):
+        '''
+        Init the model
+        '''
+
+        self.model = lgb(max_depth=2, metric='auc', n_estimators=200, objective='binary', random_state=0)
+        #self.model = abc(n_estimators=250, learning_rate=0.3)
+        
+    def predict(self, X):
+        '''
+        Edit this function to fit your model.
+
+        This function should provide predictions of labels on (test) data.
+        Make sure that the predicted values are in the correct format for the scoring
+        metric.
+        preprocess: it our code for add feature to the data before we predict the model.
+        :param X: is DataFrame with the columns - 'Time', 'Device_ID', 'Rssi_Left','Rssi_Right'. 
+                  X is window of size 360 samples time, shape(360,4).
+        :return: a float value of the prediction for class 1 (the room is occupied).
+        '''
+        # preprocessing should work on a single window, i.e a dataframe with 360 rows and 4 columns
+        x = preprocess(X)
+        y = self.model.predict_proba(x)[:,1][0] # Track 1
+        #y = np.int(self.model.predict(x)[0]) # Track 2
+        
+        return y
+
+    def load(self, dir_path):
+        '''
+        Edit this function to fit your model.
+
+        This function should load the model that you trained on the train set.
+        :param dir_path: A path for the folder the model is submitted 
+        '''
+        model_name = 'model_track_1.sav' 
+        model_file = os.path.join(dir_path, model_name)
+        self.model = joblib.load(model_file)
