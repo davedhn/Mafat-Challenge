@@ -1,0 +1,107 @@
+import numpy as np   
+import pandas as pd
+
+def extract_features(data):
+    X = pd.DataFrame(columns = data.columns)
+    for col in data.columns :
+        X.loc[0,col] = np.array(data[col])
+    # Feature crafting
+    p = 0.5
+    X["pr2"] = list(map(lambda x: np.mean(x**2) ,X["RSSI_Right"]))
+    X["pl2"] = list(map(lambda x: np.mean(x**2) ,X["RSSI_Left"]))
+    X["pr3"] = list(map(lambda x: np.mean(x**3) ,X["RSSI_Right"]))
+    X["pl3"] = list(map(lambda x: np.mean(x**3) ,X["RSSI_Left"]))
+    FFTr = list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Right"]))
+    FFTl = list(map(lambda x: np.log(10**(-6)+np.abs(np.fft.rfft((x - np.mean(x))/(np.std(x) or 1))[1:])) ,X["RSSI_Left"]))
+    indr = list(map(lambda x: np.argmin(x) ,FFTr))
+    indl = list(map(lambda x: np.argmin(x) ,FFTl))
+    X["indminr"] = indr
+    X["indminl"] = indl
+    ind2r = list(map(lambda x: np.argmax(x) ,FFTr))
+    ind2l = list(map(lambda x: np.argmax(x) ,FFTl))
+    X["indmaxr"] = indr
+    X["indmaxl"] = indl
+    X["diffminr"] = [fr[r] - fl[r] for r,fr,fl in zip(indr,FFTr,FFTl)] 
+    X["diffminl"] = [fl[l] - fr[l] for l,fr,fl in zip(indl,FFTr,FFTl)] 
+    X["diffmaxr"] = [fr[r] - fl[r] for r,fr,fl in zip(ind2r,FFTr,FFTl)] 
+    X["diffmaxl"] = [fl[l] - fr[l] for l,fr,fl in zip(ind2l,FFTr,FFTl)] 
+    X["probmeanr"] = list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Right"]))
+    X["probmeanl"] = list(map(lambda x: np.mean(p**(x - np.mean(x))) ,X["RSSI_Left"]))
+    X["corr"] = [np.correlate(r,l) for r,l in zip(FFTr,FFTl)][0]
+    X["maxmin"] = [max(fr[r],fl[l]) for r,l,fr,fl in zip(indr,indl,FFTr,FFTl)]
+    X["minmax"] = [min(fr[r],fl[l]) for r,l,fr,fl in zip(ind2r,ind2l,FFTr,FFTl)]
+    X["varr"] = [np.var(e) for e in zip(X["RSSI_Right"])]
+    X["varl"] = [np.var(e) for e in zip(X["RSSI_Left"])]
+    X["spike_neg_r"] = list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTr))
+    X["spike_neg_l"] = list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) <0)[0]) == 2)[0]), FFTl))
+    X["spike_pos_r"] = list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTr))
+    X["spike_pos_l"] = list(map(lambda x: len(np.where(np.diff(np.where(np.diff(x) >0)[0]) == 2)[0]), FFTl))
+    X["get_back_zero_r"] = list(map(lambda x: len(np.where(x ==0)[0]), FFTr))
+    X["get_back_zero_l"] = list(map(lambda x: len(np.where(x ==0)[0]), FFTl))
+
+    return pd.DataFrame(X)
+    
+def preprocess(X):
+    """
+    Calculate the features on the selected RSSI on the test set
+    :param X: Dataset to extract features from.
+    :param RSSI_value_selection: Which signal values to use- - in our case it is Average.
+    :return: Test x dataset with features
+    """
+    x = extract_features(X)
+    
+    return x.drop(columns=["Time","Device_ID","RSSI_Left","RSSI_Right"])
+    
+
+import pickle
+import numpy as np
+from os.path import isfile
+import joblib
+from lightgbm import LGBMClassifier
+from helper_func import preprocess
+import os
+
+class model:
+    def __init__(self):
+        '''
+        Init the model
+        '''
+
+        self.model  = LGBMClassifier(n_estimators=300, random_state=0)
+
+    def predict(self, X):
+        '''
+        Edit this function to fit your model.
+
+        This function should provide predictions of labels on (test) data.
+        Make sure that the predicted values are in the correct format for the scoring
+        metric.
+        preprocess: it our code for add feature to the data before we predict the model.
+        :param X: is DataFrame with the columns - 'Time', 'Device_ID', 'Rssi_Left','Rssi_Right'. 
+                  X is window of size 360 samples time, shape(360,4).
+        :return: a float value of the prediction for class 1 (the room is occupied).
+        '''
+        # preprocessing should work on a single window, i.e a dataframe with 360 rows and 4 columns
+        x = preprocess(X)
+        #y = self.model.predict_proba(x)[:,1][0] # Track 1
+        y = np.int(self.model.predict(x)[0]) # Track 2
+        
+        '''
+        Track 2 - for track 2 we naively assume that the model from track-1 predicts 0/1 correctly. 
+        We use that assumption in the following way:
+        when the room is occupied (1,2,3 - model predicted 1) we assign the majorty class (2) as prediction.       
+        '''
+        #y = 0 if y<0.5 else 2
+        return y
+
+    def load(self, dir_path):
+        '''
+        Edit this function to fit your model.
+
+        This function should load the model that you trained on the train set.
+        :param dir_path: A path for the folder the model is submitted 
+        '''
+        model_name = 'model_track_2.sav' 
+        model_file = os.path.join(dir_path, model_name)
+        self.model = joblib.load(model_file)
+
