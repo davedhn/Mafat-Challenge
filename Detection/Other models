@@ -1,0 +1,53 @@
+# MLP
+## Training
+model_mlp = mlp(random_state=0)
+parameter_grid = {'hidden_layer_sizes': [(50,50,50), (50,100,50), (100,)],
+    'activation': ['tanh'],
+    'solver': ['sgd', 'adam'],
+    'alpha': [0.0001, 0.05],
+    'learning_rate': ['constant']}
+stratified = StratifiedKFold(n_splits = 5, shuffle= True, random_state=0)
+MLP = GridSearchCV(estimator=model_mlp, param_grid=parameter_grid, cv=stratified)
+MLP.fit(Xtrain.iloc[:,5:], ytrain)
+
+
+AUC = auc(ytrain, MLP.predict_proba(Xtrain.iloc[:,5:])[:,1])
+print("MLP training set AUC", AUC)
+plot_roc(MLP,Xtrain,ytrain)
+
+## Test
+AUC = auc(ytest, MLP.predict_proba(Xtest.iloc[:,5:])[:,1])
+print("MLP test set AUC", AUC)
+plot_roc(MLP,Xtest,ytest)
+
+## Loss of MLP
+plot_loss(MLP,Xtrain,Xtest)
+
+## MLP all data
+MLP.best_estimator_.fit(X.iloc[:,5:], y)
+AUC = auc(y, MLP.best_estimator_.predict_proba(X.iloc[:,5:].values)[:,1])
+print("MLP training set AUC", AUC)
+
+# GBM
+## Training
+model_gbm = gbm(random_state=0)
+parameter_grid = {"n_estimators" : [30], "max_depth" : [4]}
+stratified = StratifiedKFold(n_splits = 5, shuffle= True, random_state=0)
+GBM = GridSearchCV(estimator=model_gbm, param_grid=parameter_grid, cv=stratified)
+GBM.fit(Xtrain.iloc[:,5:], ytrain)
+AUC = auc(ytrain, GBM.predict_proba(Xtrain.iloc[:,5:])[:,1])
+print("GBM training set AUC", AUC)
+plot_roc(GBM,Xtrain,ytrain)
+
+## Test
+AUC = auc(ytest,GBM.predict_proba(Xtest.iloc[:,5:])[:,1])
+print(AUC)
+plot_roc(GBM,Xtest,ytest)
+
+## GBM all data
+GBM.fit(X.iloc[:,5:], y)
+AUC = auc(y, GBM.predict_proba(X.iloc[:,5:].values)[:,1])
+print("GBM training set AUC", AUC)
+
+## Loss of GBM 
+plot_loss(GBM,Xtrain,Xtest)
